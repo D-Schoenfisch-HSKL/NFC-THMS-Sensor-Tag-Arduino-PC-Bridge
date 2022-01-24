@@ -1,0 +1,186 @@
+#include <DFRobot_PN532.h>
+#include <stdio.h>
+#include <stdbool.h> 
+#include <NFC_THMS_to_Serial.h>
+
+// Version: V1.1
+
+
+/*----------- CONFIGURATION -------------*/
+#define FSM_SLOWDOWN                        500   // Slowdown of Finite-State-Machine in ms
+#define DEFAULT_FOR_CONTINUOUS_MEASUREMENT  true  // Default setup to do continuous measurement
+#define DEFAULT_MEASUREMENT_INTERVAL_IN_S   120    // Default interval for continuouse measurement
+/*---------------------------------------*/
+
+/*----------- ToDo -------------*/
+//  - Value Parsing
+//  - Handling instructions from serial
+//  - Check if measurement is complete in ndef-text (!= Do: 2)
+//  - Check error messages from tag (== Do:FF ???)
+
+/*---------- Typedefinitions ------------*/
+typedef enum {
+  FSM_SEARCH_SENSOR             = 0x00,
+  FSM_INITIATE_MEASUREMENT      = 0x01,
+  FSM_GET_MEASUREMENT           = 0x02,
+  FSM_WAIT_FOR_INSTURCTION      = 0x03,
+  FSM_ERROR                     = 0xFF
+}finite_state_machine_state_t;
+
+typedef enum {
+  ERROR_NO_ERROR                = 0x0000,
+  ERROR_SET_INSTRUCTION         = 0x0001,
+  ERROR_READ_NDEF_TEXT          = 0x0002,
+  ERROR_UNKNOWN_FSM_STATE       = 0x0004,
+  ERROR_NO_SENSOR_AVAILABLE     = 0x0008,
+  ERROR_SENSOR_CONNECTION_LOST  = 0x0010,
+  ERROR_SENSOR_COMMUNICATION    = 0x0020,
+  ERROR_UNKNOWN                 = 0x8000
+}error_indicator_t;
+
+
+/*------------ Global Variables ---------------*/
+static finite_state_machine_state_t fsm_state;
+static uint16_t error_no = ERROR_NO_ERROR;
+static bool  continuous_measurement = DEFAULT_FOR_CONTINUOUS_MEASUREMENT;
+static uint16_t cont_meas_interval_in_s = DEFAULT_MEASUREMENT_INTERVAL_IN_S;
+static bool  sensor_available_m = false;
+
+/*------------ Function Declaration ---------------*/
+/* Search sensor for 5s (5 times) certain time*/
+void check_sensor_availability_5s(void);
+
+
+void setup() {
+  /* Initialisierung serielle Kommunikation*/
+  Serial.begin(115200);   
+  Serial.println("\r\n\r\n>>> Start: NFC-THMS to Serial");
+
+  /* Initialisierung NFC-Gerät via I2C */        
+  while (!init_NT2S()) {      
+    Serial.println(">>> Init failure");
+    delay (1000);
+  }
+  fsm_state = FSM_SEARCH_SENSOR;
+}
+
+void loop() {
+/*>>> FINITE STATE MACHINE <<<*/
+  //Only for Debug:     Serial.print("FSM State: "),Serial.println(fsm_state,HEX);
+  switch(fsm_state){
+    case FSM_SEARCH_SENSOR:
+      static bool new_sensor_search = true;
+      if(new_sensor_search) Serial.print(">>> Search sensor");
+      sensor_available_m = NT2S_search_sensor(); //Ersetzen? -> check_sensor_availability_5s
+      if(sensor_available_m) {
+        Serial.println(" > Found");
+        fsm_state = continuous_measurement?FSM_INITIATE_MEASUREMENT:FSM_WAIT_FOR_INSTURCTION;
+        new_sensor_search = true;
+      } else {
+        Serial.print(".");
+        new_sensor_search = false;
+      }
+      break;
+
+    case FSM_INITIATE_MEASUREMENT:
+      Serial.println(">>> Initiate measurement");  
+      check_sensor_availability_5s(); // Check if sensor is still available
+      if(sensor_available_m) {
+        if(NT2S_set_instruction(NT2S_DO_SINGLE_MEASUREMENT)) {
+          delay(6000);
+          fsm_state = FSM_GET_MEASUREMENT;
+          break;
+        } else {
+          error_no |= ERROR_SET_INSTRUCTION;
+          break;
+        }
+      } else {
+        break;
+      }
+      error_no |= ERROR_UNKNOWN;
+      break;
+
+    case FSM_GET_MEASUREMENT:
+      message_array_t  text_data_array; //Array for text message
+      check_sensor_availability_5s(); // Check if sensor is still available
+      if(sensor_available_m) {
+        if(NT2S_read_ndef_text(text_data_array)) {
+          static uint8_t wait_counter_to_complete_measurement = 0;
+          if((memcmp(text_data_array, "Do:02", 5) == 0) || (memcmp(text_data_array, "Do: 2", 5) == 0)) {
+            // Wait for measurement to be completed
+            Serial.println(">>> Wait for tag to complete measurement!");
+            delay(1000);
+            wait_counter_to_complete_measurement++;
+            if(wait_counter_to_complete_measurement == 10) {
+              error_no |= ERROR_SENSOR_COMMUNICATION;
+              wait_counter_to_complete_measurement = 0;
+              fsm_state = FSM_WAIT_FOR_INSTURCTION;
+            }
+          } else {
+            Serial.println(">>> New measurement data: ");
+            Serial.println(text_data_array);
+            wait_counter_to_complete_measurement = 0;
+            fsm_state = FSM_WAIT_FOR_INSTURCTION;
+          }
+          break;
+          // ToDo: Parse-Funktion mit :"scanf(text_message,"Do:%*d;No:%d;SS:%d;MS:%d;RSQPB:%d%*s",&MeasurementNo,&SensorSignal,&MeasurementSignal,&r_sqrt_by2pow32);" ???
+        } else {
+          error_no |= ERROR_READ_NDEF_TEXT;
+          break;
+        }
+      }
+      error_no |= ERROR_UNKNOWN;
+      break;
+
+    case FSM_WAIT_FOR_INSTURCTION:
+      if(continuous_measurement) {
+        static uint16_t wait_counter = (1000/FSM_SLOWDOWN)*cont_meas_interval_in_s;
+        if (wait_counter == (1000/FSM_SLOWDOWN)*cont_meas_interval_in_s) {
+            Serial.print(">>> Wait for next measurement in [s]: ");
+            Serial.println(cont_meas_interval_in_s,DEC);
+        }
+        if(wait_counter == 0) {
+          fsm_state = FSM_INITIATE_MEASUREMENT;
+          wait_counter = (1000/FSM_SLOWDOWN)*cont_meas_interval_in_s;
+        } else {
+          wait_counter--;
+        }
+      }
+      //ToDo: Handling of instructions from serial ?!?
+      break;
+
+    case FSM_ERROR:
+      error_no |= ERROR_UNKNOWN;
+      break;
+
+    default:
+      fsm_state = FSM_ERROR;
+      error_no |= ERROR_UNKNOWN_FSM_STATE;
+      break;
+  }
+  //ToDo: General error handling (if(error_no))
+  if(error_no != ERROR_NO_ERROR) {
+      Serial.print(">>> ERROR No: 0x"); Serial.println(error_no, HEX);
+      error_no = ERROR_NO_ERROR;
+      if(!sensor_available_m) fsm_state = FSM_SEARCH_SENSOR;
+  }
+  //ToDo: Handling of instructions from serial ?!?
+          // ?? Wenn in "FSM Wait for instruction", dann können keine Befehle entgegengenommen werden während Messung oder Sensorsuche !!
+  delay(FSM_SLOWDOWN); 
+}
+
+/* Search sensor for 5s (5 times) certain time*/
+// ToDo: Exclude "sensor_available" -> only "sensor_available_m"
+void check_sensor_availability_5s(void) {
+  uint8_t try_counter = 5;
+  while(!NT2S_search_sensor()) {
+    try_counter--;
+    delay(1000);
+    if(try_counter == 0) {
+      sensor_available_m = false;
+      error_no |= ERROR_SENSOR_CONNECTION_LOST;
+      Serial.println(">>> Can not connect to tag.");
+      break;
+    } 
+  } 
+}
