@@ -22,7 +22,7 @@
 
 /*>>>------------------------------------------------------------*/
 /* >> START: Symbols, Enums, Macros & Typedefs*/
-#define MAX_BYTE_SIZE_TO_READ_FROM_TAG  84
+#define MAX_BYTE_SIZE_TO_READ_FROM_TAG  60 //84
 
 typedef enum {
 	NT2S_INIT						   	= 0x00U,
@@ -34,8 +34,10 @@ typedef enum {
 	NT2S_ERROR							= 0xFFU  // Unknown instruction.
 }nt2s_do_instructions_t;		// If changed update also "instruction_ascii_2_enum()" function!
 
-typedef byte rawdata_array_t[MAX_BYTE_SIZE_TO_READ_FROM_TAG];
-typedef char message_array_t[MAX_BYTE_SIZE_TO_READ_FROM_TAG];
+typedef struct data_array_t {
+	uint8_t length;
+	char x[MAX_BYTE_SIZE_TO_READ_FROM_TAG];
+}data_array_t;
 /* >> END: Symbols, Enums, Macros & Typedefs */
 
 
@@ -44,9 +46,8 @@ typedef char message_array_t[MAX_BYTE_SIZE_TO_READ_FROM_TAG];
 /* >> START: External Functions (Deklarationen/Prototypen)*/
 
 /************************************************************************************
- * Do initialization
- * @fn init_nt2s
- * @brief Initialize the THMS-NFC Sensor-Bridge.
+ * @brief Do initialization
+ * 
  * @return Boolean type, the result of operation.
  * @retval TRUE Initialization success
  * @retval FALSE Initialization failed
@@ -54,41 +55,50 @@ typedef char message_array_t[MAX_BYTE_SIZE_TO_READ_FROM_TAG];
 bool init_NT2S(void); 
 
 /************************************************************************************
- *  Search for THMS-NFC Sensor-Tag and get its informations.
+ * @brief: Search for THMS-NFC Sensor-Tag and get its informations.
+ * 
+ * @return true: Sensor found.
+ * @return false: No sensor found
  ************************************************************************************/
 bool NT2S_search_sensor(void);
 
 /************************************************************************************
- *  Reads NFC-THMS-Sensor-Tag text message to "message_array" (char array). 
+ * @brief Reads NFC-THMS-Sensor-Tag text message to "message_array" (char array). 
+ * 
+ * @param message_array: Pointer for read NDEF-Text as uint8_t array
+ * @param max_length: Length of message_array
+ * @return true: Successful
+ * @return false: Unsuccessful
  ************************************************************************************/
-bool NT2S_read_ndef_text(message_array_t message_array);
+bool NT2S_read_ndef_text(uint8_t message_array[], uint8_t max_length);
 
 /************************************************************************************
- *  Reads NFC-THMS-Sensor-Tag meamory data and copies result to "memory_data_array" (char array). 
+ * @brief Reads NFC-THMS-Sensor-Tag meamory data and copies result to "memory_data_array" (char array). 
+ * 
+ * @param memory_data_array: Pointer for read raw data as uint8_t array
+ * @param length: Length of message_array
+ * @return true: Successful
+ * @return false: Unsuccesful
  ************************************************************************************/
-bool NT2S_read_raw(rawdata_array_t memory_data_array); 
+bool NT2S_read_raw(uint8_t memory_data_array[], uint8_t length); 
 
 /************************************************************************************
- *  Zurücksetzen der Variablen index_m 
- *	Zurücksetzen des Arrays info_pointer_array_m
- *	Kein Rückgabewert
+ * @brief Writes "Do-instruction" as NDEF-Message to sensor-tag
+ * 
+ * @param do_instruction: Do-Instruction number as uint8_t.
+ * @return true: Successful
+ * @return false: Unsuccessful
  ************************************************************************************/
-void reset(void);
+bool NT2S_set_instruction(uint8_t do_instruction);
 
 /************************************************************************************
- *  Anweisung in Memory des Sensor-Tags schreiben
- *  Rückgabe: true, Schreibvorgang abgeschlossen
+ * ToDo
+ * @brief Überprüfen ob do_instruction eine bekannte Instroction ist (in nt2s_do_instructions_t definiert)
+ * @param do_instruction Do-instruction als byte
+ * @return true: Valid instrucition
+ * @return false: Invalid/Unknown insturction
  ************************************************************************************/
-bool NT2S_set_instruction(nt2s_do_instructions_t do_instruction);
-
-/************************************************************************************
- * Umwandeln von 2 chars (ascii) zu "nt2s_do_instructions_t" enumeration
- * @fn instruction_ascii_2_enum
- * @brief Umwandeln von 2 chars (ascii) zu "nt2s_do_instructions_t" enumeration
- * @param array_of_2chars Do-instruction as two chars (ascii)
- * @retval Enumeration-typedef of do instruction
- ************************************************************************************/
-nt2s_do_instructions_t instruction_ascii_2_enum(char array_of_2chars[]);
+bool check_do_instruction(uint8_t do_instruction);
 
 /* >> END: External Functions */
 

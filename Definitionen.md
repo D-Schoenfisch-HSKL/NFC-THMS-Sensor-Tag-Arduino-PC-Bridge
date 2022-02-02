@@ -15,11 +15,11 @@ Folgende Eingaben sind möglich:
 
 Eingabe| Definition
 -------------- | --------
-S | Sensor suchen (Start/Stop).			
+S | Sensor suchen (T:Start / F:Stop) (z.B. "S:T"). Bei "S" wird Zustand getoggelt.
 M | Einzelne Messung triggern (Es wird "Do:02" an den Tag gesendet).	
 I | Senden einer bestimmten Do-Instruction an den Tag    (Z.B. "I:04" für einen Reset oder "I:06" um den Tag Konfigurationsdaten ausgeben zu lassen. Diese müssen nochmal gesondert ausgelesen werden.)
-R | (Noch nicht implementiert) Auslesen der aktuellen NDEF-Nachricht auf dem NFC-TMS-Sensor-Tag.
-W | (Noch nicht implementiert) Schreiben einer NDEF-Nachricht auf den Sensor-Tag.
-C | Kontinuierliche Messung aktivierten/deaktivieren.		
+R | Auslesen der aktuellen NDEF-Nachricht auf dem NFC-TMS-Sensor-Tag.
+W | Schreiben einer NDEF-Nachricht auf den Sensor-Tag.
+C | Kontinuierliche Messung (T:Start / F:Stop) (z.B. "C:T"). Bei "C" wird Zustand getoggelt.
 T | Intervallzeit einstellen für die kontinuierliche Messung (Z.B. "T:120" für alle 120 Sekunden).
 X | (Noch nicht implementiert) Zurücksetzen und neu starten.

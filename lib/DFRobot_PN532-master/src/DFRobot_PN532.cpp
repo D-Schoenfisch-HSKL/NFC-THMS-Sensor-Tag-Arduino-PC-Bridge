@@ -38,20 +38,19 @@ uint8_t DFRobot_PN532::readNTAG(uint8_t *buffer,uint8_t block){
         return -1;
     if(!scan())
         return -1;
-    unsigned char cmdRead[4];
-        cmdRead[0] = COMMAND_INDATAEXCHANGE;
-        cmdRead[1] = 1;                   /* Card number */
-        cmdRead[2] = CARD_CMD_READING;     /* NTAG Read command = 0x30 */
-        cmdRead[3] = block; 
+    uint8_t cmdRead[4];
+    cmdRead[0] = COMMAND_INDATAEXCHANGE;
+    cmdRead[1] = 1;                   /* Card number */
+    cmdRead[2] = CARD_CMD_READING;     /* NTAG Read command = 0x30 */
+    cmdRead[3] = block; 
     
     writeCommand(cmdRead,4);
     if(!readAck(32))
         return -1;
-    String dataSrt = "";
     if(receiveACK[12] == 0x41 && receiveACK[13] == 0x00){
         for(uint8_t i = 0;i<4;i++){
             buffer[i] = receiveACK[14 + i];
-               }
+        }
     }
     else
         return -1;
@@ -71,7 +70,7 @@ bool  DFRobot_PN532::writeNTAG(int block, uint8_t data[]){
         cmdWrite[1] = 1;                      /* Card number */
         cmdWrite[2] = CARD_CMD_WRITEINGTONTGE;       /* NTAG Write command = 0xA2 */
         cmdWrite[3] = block;
-    for(int i = 4;i < 8;i++) cmdWrite[i]=data[i - 4];// Data to be written
+    for(int i = 4;i < 8;i++) {cmdWrite[i]=data[i - 4];}// Data to be written
     this->writeCommand(cmdWrite,8);
 
     this->readAck(16);
@@ -452,13 +451,20 @@ void DFRobot_PN532_IIC::writeCommand(uint8_t* cmd, uint8_t cmdlen) {
     Wire.write(~cmdlen + 1);
     Wire.write(HOSTTOPN532);
     checksum += HOSTTOPN532;
-    for (uint8_t i = 0; i < cmdlen - 1; i++) {
+    for (uint8_t i = 0; i < (cmdlen - 1); i++) {
       Wire.write(cmd[i]);
       checksum += cmd[i];
     }
     Wire.write((byte)~checksum);
     Wire.write((byte)PN532_POSTAMBLE);
     Wire.endTransmission();
+
+    /*Serial.print("C > PN5: ");
+    for (uint8_t i = 0; i < (cmdlen - 1); i++) {
+      Serial.print(cmd[i],HEX);
+      Serial.print(" ");
+    }
+    Serial.println();*/
 }
 
 bool DFRobot_PN532_IIC::readAck(int x,long timeout ) {
@@ -506,6 +512,14 @@ bool DFRobot_PN532_IIC::readAck(int x,long timeout ) {
             receiveACK[6 + i] = Wire.read();
         }
     }
+
+    /*Serial.print("PN5 > C: ");
+    for (uint8_t i = 0; i < sizeof(receiveACK); i++) {
+      Serial.print(receiveACK[i],HEX);
+      Serial.print(" ");
+    }
+    Serial.println();*/
+
     if(strncmp((char *)pn532ack,(char *)receiveACK, 6)!=0){
         return false ;
     }

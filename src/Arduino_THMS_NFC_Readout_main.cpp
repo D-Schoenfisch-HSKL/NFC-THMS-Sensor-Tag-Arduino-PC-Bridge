@@ -1,18 +1,18 @@
-#include <DFRobot_PN532.h>
 #include <stdio.h>
 #include <stdbool.h> 
 #include <NFC_THMS_to_Serial.h>
+//#include <SoftwareReset.h>
 
-// Version: V1.3
+// Version: V1.4
 
 /*----------- ToDo -------------*/
 //  - Handling serial conmmands to
-//    - Value parsing to config continuous-measurement time
-//    - Handling direct reading or writng to tag
-//    - Set of special instruction to tag.
 //    - Instruction to reset and reboot.
 //  - Check if measurement is complete in ndef-text (!= Do: 2)
 //  - Check error messages from tag (== Do:FF ???)
+//  - Reset of TAG (Power-cycle NFC-Field)
+//  - Check if Do-Instruction is valid???
+
 
 /*----------- CONFIGURATION -------------*/
 #define FSM_SLOWDOWN                        500    // Slowdown of Finite-State-Machine in ms
@@ -24,13 +24,17 @@
 #define PRINT_DEBUG_INFO_FSM                false   // To print FSM-State info via uart.
 #define PRINT_NEXT_MEASUREMENT_INFO         false   // To print time to next measurement in seconds via uart.
 #define PRINT_EXTENDED_INFO                 false   // To print some extended standard info via uart.
+
+#define MAXIMAL_INFO_MESSAGE_LENGT    81
+#define MAXIMAL_NDEF_MESSAGE_LENGT    81
+
 /*---------------------------------------*/
 
 /*---------- Typedefinitions ------------*/
 typedef enum {
   FSM_IDLE                      = 0x00,
   FSM_SEARCH_SENSOR             = 0x01,
-  FSM_DO_MEASUREMENT            = 0x02,
+  //FSM_DO_MEASUREMENT            = 0x02,
   FSM_WRITE_INSTRUCTION         = 0x03,
   FSM_READ_TAG_DATA             = 0x04,
   FSM_WRITE_DATA                = 0x05,
@@ -56,7 +60,7 @@ typedef enum {
   ERROR_UNKNOWN_FSM_STATE       = (0x1 << 3), // = 0x0008
   ERROR_NO_SENSOR_AVAILABLE     = (0x1 << 4), // = 0x0010
   ERROR_SENSOR_CONNECTION_LOST  = (0x1 << 5), // = 0x0020
-  ERROR_SENSOR_COMMUNICATION    = (0x1 << 6), // = 0x0040
+  ERROR_GET_DATA                = (0x1 << 6), // = 0x0040
   ERROR_SERIAL_INPUT            = (0x1 << 7), // = 0x0080
   ERROR_UNKNOWN                 = (0x1 << 15) // = 0x8000
 }error_indicator_t;
@@ -72,38 +76,40 @@ typedef enum {
   SI_RESET                      = 'X'  // Reset and reboot.
 }serial_instruction_t;
 
-typedef char info_array_t[100];
-
 /*------------ Global Variables ---------------*/
 static finite_state_machine_state_t fsm_state;
 static uint16_t error_no = ERROR_NO_ERROR;
-static bool  continuous_measurement = DEFAULT_FOR_CONTINUOUS_MEASUREMENT;
-static uint16_t cont_meas_interval_in_s = DEFAULT_MEASUREMENT_INTERVAL_IN_S;
+static bool  continuous_measurement_m = DEFAULT_FOR_CONTINUOUS_MEASUREMENT;
+static uint16_t cont_meas_interval_in_s_m = DEFAULT_MEASUREMENT_INTERVAL_IN_S;
 static bool  sensor_available_m = false;
-static unsigned long next_measurement_time_s = 0;
+static unsigned long next_measurement_time_s_m = 0;
 static uint8_t debug_level = (PRINT_DEBUG_INFO_ERROR*INFO_ERROR_INFO) 
                            | (PRINT_DEBUG_INFO_STANDAR*INFO_STANDARD_INFO) 
                            | (PRINT_DEBUG_INFO_FSM*INFO_FSM_STATE) 
                            | (PRINT_NEXT_MEASUREMENT_INFO*INFO_NEXT_MEASUREMENT_INFO)
                            | (PRINT_EXTENDED_INFO*INFO_EXTENDED_INFO);
-static info_array_t info_array_m;
-static message_array_t text_message; //Array for text message
-static nt2s_do_instructions_t do_insturction_to_set_m;
+static char info_array_m[MAXIMAL_INFO_MESSAGE_LENGT];
+static uint8_t nfc_message_m[MAXIMAL_NDEF_MESSAGE_LENGT]; //Array for text message (NDEF)
+static uint8_t do_insturction_to_set_m;
+bool get_response_m; // To get response after do-instruction
 
 
 /*------------ Function Declaration ---------------*/
 void check_sensor_availability_5s(void); /* Search sensor for 5s (5 times) certain time*/
 void check_for_serial_instructions(void);  // Maximal length for instruction is 50. Each instruction has to end with '\n'.
 void parse_serial_4_instruction(char buf[], int rlen); 
-bool set_instruction(nt2s_do_instructions_t do_instruction);
-void print_debug_info(info_array_t info_text, uart_debug_info_t info_level);  // To print infos via USB-UART (Serial)
-bool get_tag_data(message_array_t text_data_array);
+bool set_instruction(uint8_t do_instruction);
+bool set_instruction_to_do_measurement();
+void print_debug_info(uart_debug_info_t info_level);  // To print infos via USB-UART (Serial)
+void print_debug_info_f(const __FlashStringHelper * string_to_print, uart_debug_info_t info_level); //Print flash string (um RAM zu sparen)
+bool get_tag_data(uint8_t text_data_array[], uint8_t max_length);
 
 
 void setup() {
   /* Initialisierung serielle Kommunikation*/
   Serial.begin(115200);   
   pinMode(LED_BUILTIN , OUTPUT);
+  get_response_m = false;
 
   while(!Serial) {
     digitalWrite(LED_BUILTIN , HIGH);
@@ -111,17 +117,15 @@ void setup() {
     digitalWrite(LED_BUILTIN , LOW);
     delay (100);
   }
-  next_measurement_time_s = millis()/1000;
-  memcpy(info_array_m, "NFC-THMS to Serial",19);
-  print_debug_info(info_array_m,INFO_STANDARD_INFO);
+  next_measurement_time_s_m = millis()/1000;
+  print_debug_info_f(F("NFC-THMS to Serial"),INFO_STANDARD_INFO);
   memset(info_array_m,0,sizeof(info_array_m));
   sprintf(info_array_m,"Debug level: 0x%x",debug_level);
-  print_debug_info(info_array_m,INFO_STANDARD_INFO);
+  print_debug_info(INFO_STANDARD_INFO);
 
   /* Initialisierung NFC-Gerät via I2C */        
   while (!init_NT2S()) {      
-  memcpy(info_array_m, "Init failure",13);
-  print_debug_info(info_array_m,INFO_ERROR_INFO);
+    print_debug_info_f(F("Init failure"),INFO_ERROR_INFO);
     delay (1000);
   }
   sensor_available_m = false;
@@ -132,139 +136,107 @@ void loop() {
   digitalWrite(LED_BUILTIN , HIGH); // To indicate some operation.
   memset(info_array_m,0,sizeof(info_array_m));
   sprintf(info_array_m,"FSM State: 0x%x",fsm_state);
-  print_debug_info(info_array_m,INFO_FSM_STATE);
+  print_debug_info(INFO_FSM_STATE);
 
   /*>>> FINITE STATE MACHINE <<<*/
   switch(fsm_state){
     case FSM_IDLE: {
-      if(continuous_measurement) {
-        if ((millis()/1000) >= next_measurement_time_s) {
-          fsm_state = FSM_DO_MEASUREMENT;
-          next_measurement_time_s = (millis()/1000) + cont_meas_interval_in_s;          
+      if(continuous_measurement_m) {
+        if ((millis()/1000) >= next_measurement_time_s_m) {
+          print_debug_info_f(F("Time to do auto measurement."),INFO_STANDARD_INFO);
+          do_insturction_to_set_m = NT2S_DO_SINGLE_MEASUREMENT;
+          fsm_state = FSM_WRITE_INSTRUCTION;
+          get_response_m = true;
+          next_measurement_time_s_m = (millis()/1000) + cont_meas_interval_in_s_m;          
         } else {
           memset(info_array_m,0,sizeof(info_array_m));
           static unsigned int last_time_to_next_measurement = 0;
-          unsigned int time_to_next_measurement = (next_measurement_time_s - (millis()/1000));
+          unsigned int time_to_next_measurement = (next_measurement_time_s_m - (millis()/1000));
           if(last_time_to_next_measurement != time_to_next_measurement){
-            last_time_to_next_measurement = next_measurement_time_s - (millis()/1000);
-            sprintf(info_array_m,"Next measurement in [s]:%u",(unsigned int)(next_measurement_time_s - (millis()/1000)));
-            print_debug_info(info_array_m,INFO_NEXT_MEASUREMENT_INFO); 
+            last_time_to_next_measurement = next_measurement_time_s_m - (millis()/1000);
+            sprintf(info_array_m,"Next meas. in [s]:%u",(unsigned int)(next_measurement_time_s_m - (millis()/1000)));
+            print_debug_info(INFO_NEXT_MEASUREMENT_INFO); 
           }
         }
       }
       break;
-    }//End case FSM_IDLE
+    }
+    //End case FSM_IDLE
 
     case FSM_SEARCH_SENSOR: {
       check_sensor_availability_5s();
       if(sensor_available_m) {
-        memcpy(info_array_m, "Sensor found!",14);print_debug_info(info_array_m,INFO_STANDARD_INFO);
+        print_debug_info_f(F("Sensor found!"),INFO_STANDARD_INFO);
         fsm_state = FSM_IDLE;
       } else {
-        memcpy(info_array_m, "No sensor found !!!",20);print_debug_info(info_array_m,INFO_STANDARD_INFO);
+        print_debug_info_f(F("No sensor found !!!"),INFO_STANDARD_INFO);
       }
       break;
-    }//End case FSM_SEARCH_SENSOR
-
-    case FSM_DO_MEASUREMENT: {
-      memcpy(info_array_m, "Initiate measurement",21);print_debug_info(info_array_m,INFO_STANDARD_INFO);
-      bool do_measurement_instruction_set = false;
-      bool measurement_complete = false;
-      if(!sensor_available_m) {check_sensor_availability_5s();}
-      if(sensor_available_m) {
-        do_measurement_instruction_set = set_instruction(NT2S_DO_SINGLE_MEASUREMENT);
-        if(do_measurement_instruction_set) {  
-          memcpy(info_array_m, "Wait for Tag to complete measurement...",40);print_debug_info(info_array_m,INFO_STANDARD_INFO);
-          delay(6000); // Wait for complete Measurement
-          if(!sensor_available_m) {check_sensor_availability_5s();}
-          measurement_complete = get_tag_data(text_message);
-          if(measurement_complete) {
-            memcpy(info_array_m, "New measurement data:",22);print_debug_info(info_array_m,INFO_STANDARD_INFO);
-            Serial.println(text_message);
-            fsm_state = FSM_IDLE;
-          } else {fsm_state = FSM_ERROR;}
-        } else {fsm_state = FSM_ERROR;}
-      } else {fsm_state = FSM_ERROR;}
-      if(!do_measurement_instruction_set) {error_no |= ERROR_SET_INSTRUCTION;}
-      if(!measurement_complete) {error_no |= ERROR_READ_NDEF_TEXT;}
+    }
+    //End case FSM_SEARCH_SENSOR
       
-      break;
-    }//End case FSM_DO_MEASUREMENT (0x02)
-
-    /* ToDo: Überprüfen.
-    // Wenn enabled, dann gibt es Probleme beim Auslesen des Tags (NFC_THMS_to_Serial Library) !?!?!?!
     case FSM_WRITE_INSTRUCTION: {
-      if(set_instruction(do_insturction_to_set_m)) {
-        memcpy(info_array_m, "Instruction sent to tag", 24); 
-        print_debug_info(info_array_m,INFO_STANDARD_INFO);
+      sprintf(info_array_m,"Write inst.: 0x%x",do_insturction_to_set_m);
+      print_debug_info(INFO_STANDARD_INFO);
+      bool instruction_is_set = false;  
+      if(!sensor_available_m) {check_sensor_availability_5s();}
+      if(sensor_available_m) instruction_is_set = NT2S_set_instruction(do_insturction_to_set_m);
+      if(instruction_is_set) {
+        print_debug_info_f(F("Instruction is sent to tag"),INFO_STANDARD_INFO);
         fsm_state = FSM_IDLE;
       } else {
         error_no |= ERROR_SET_INSTRUCTION;
         fsm_state = FSM_ERROR;
       }
+      if(get_response_m) {
+        if(instruction_is_set){
+          print_debug_info_f(F("Wait for response..."),INFO_STANDARD_INFO);
+          delay(2000);
+          if(do_insturction_to_set_m == NT2S_DO_SINGLE_MEASUREMENT) delay(3000);
+          fsm_state = FSM_READ_TAG_DATA;
+        }
+        get_response_m = false;
+      }
       break;
-    } // End case FSM_WRITE_INSTRUCTION (0x03)
-    */
+    }
+    // End case FSM_WRITE_INSTRUCTION (0x03)
+
+    case FSM_READ_TAG_DATA :{
+      bool data_reading_ok = false;
+      if(!sensor_available_m) {check_sensor_availability_5s();}
+      if(sensor_available_m) data_reading_ok = NT2S_read_ndef_text(nfc_message_m, MAXIMAL_NDEF_MESSAGE_LENGT);
+      if(data_reading_ok) {
+        print_debug_info_f(F("Read data:"),INFO_STANDARD_INFO);
+        sprintf(info_array_m,"%s",nfc_message_m);
+        Serial.println(info_array_m);
+        fsm_state = FSM_IDLE;
+      } else {error_no |= ERROR_GET_DATA; fsm_state = FSM_ERROR;}
+      break;
+    }
+    //End case FSM_READ_TAG_DATA
 
     case FSM_ERROR: {
       memset(info_array_m,0,sizeof(info_array_m));
       sprintf(info_array_m,"ERROR No: 0x%x",error_no);
-      print_debug_info(info_array_m,INFO_ERROR_INFO);
+      print_debug_info(INFO_ERROR_INFO);
       fsm_state = FSM_IDLE;
       error_no = ERROR_NO_ERROR;
       break;
-    }//End case FSM_ERROR
+    }
+    //End case FSM_ERROR
 
     default: {
       fsm_state = FSM_ERROR;
       error_no |= ERROR_UNKNOWN_FSM_STATE;
       break;
-    }//End case default
+    }
+    //End case default
   }
   digitalWrite(LED_BUILTIN , LOW); // For operation indication
-  delay(FSM_SLOWDOWN); 
+  if(!get_response_m)
+    delay(FSM_SLOWDOWN); 
   check_for_serial_instructions();
-}
-
-bool set_instruction(nt2s_do_instructions_t do_instruction) {
-  bool do_measurement_instruction_is_set = false;
-  memcpy(info_array_m, "New do instruction to set",26);print_debug_info(info_array_m,INFO_EXTENDED_INFO);
-  int try_counter = 5;
-  do {
-    if(!sensor_available_m) {check_sensor_availability_5s();} // Check for sensor   
-    if(sensor_available_m) {
-      memcpy(info_array_m, "Write instruction...",21);print_debug_info(info_array_m,INFO_EXTENDED_INFO);
-      if(NT2S_set_instruction(do_instruction)) {
-        do_measurement_instruction_is_set = true;
-        memcpy(info_array_m, "Instruction writing successful.",32);print_debug_info(info_array_m,INFO_EXTENDED_INFO);
-      }
-    }
-    try_counter--;
-  } while((!do_measurement_instruction_is_set) && (try_counter != 0));
-  
-  return do_measurement_instruction_is_set;
-}
-
-bool get_tag_data(message_array_t text_data_array) {
-  bool measurement_complete = false;
-  int try_counter = 5;
-  do {
-    if(!sensor_available_m) {check_sensor_availability_5s();} // Check for sensor 
-    if(sensor_available_m) {
-      if(NT2S_read_ndef_text(text_data_array)) {
-        if((memcmp(text_data_array, "Do:02", 5) != 0) && (memcmp(text_data_array, "Do: 2", 5) != 0)) { 
-          measurement_complete = true;
-        } else {              
-          delay(1000);
-        }
-      } else {  
-        delay(150);
-        sensor_available_m = false;
-      }
-    }
-    try_counter--;
-  } while ((!measurement_complete) && (try_counter != 0));
-  return measurement_complete;
+  Serial.flush(); // Wait for serial communication to be finished.
 }
 
 void check_for_serial_instructions(void) {
@@ -280,7 +252,7 @@ void check_for_serial_instructions(void) {
 /* Search sensor for 5s (5 times) certain time*/
 // ToDo: Exclude "sensor_available" -> only "sensor_available_m"
 void check_sensor_availability_5s(void) {
-  memcpy(info_array_m, "Search sensor...",17);print_debug_info(info_array_m,INFO_EXTENDED_INFO);
+  print_debug_info_f(F("Search sensor..."),INFO_EXTENDED_INFO);
   uint8_t try_counter = 5;
   while(!NT2S_search_sensor()) {
     try_counter--;
@@ -288,7 +260,7 @@ void check_sensor_availability_5s(void) {
     if(try_counter == 0) {
       sensor_available_m = false;
       error_no |= ERROR_SENSOR_CONNECTION_LOST;
-      memcpy(info_array_m, "No sensor found!",17);print_debug_info(info_array_m,INFO_STANDARD_INFO);
+      print_debug_info_f(F("No sensor found!"),INFO_STANDARD_INFO);
       return;
     } 
   } 
@@ -296,77 +268,112 @@ void check_sensor_availability_5s(void) {
   return;
 }
 
-void print_debug_info(info_array_t info_text_in,uart_debug_info_t info_level) {
+void print_debug_info(uart_debug_info_t info_level) {
   if(info_level & debug_level) {
-    info_array_t info_text_to_print;
-    sprintf(info_text_to_print,">>> %s",info_text_in);
-    Serial.println(info_text_to_print);
+    Serial.print(">>> ");
+    Serial.println(info_array_m);
+  }
+}
+
+void print_debug_info_f(const __FlashStringHelper * string_to_print,uart_debug_info_t info_level) {
+  if(info_level & debug_level) {
+    Serial.print(F(">>> "));
+    Serial.println(string_to_print);
   }
 }
 
 void parse_serial_4_instruction(char buf[], int rlen) {
   //ToDo: Parse for instruction or change config etc
-  memcpy(info_array_m, "New serial instruction",23);print_debug_info(info_array_m,INFO_STANDARD_INFO);
+  print_debug_info_f(F("New serial instruction"),INFO_STANDARD_INFO);
   switch(buf[0]) {
     case SI_SEARCH_SENSOR: 
     case (SI_SEARCH_SENSOR|0x20):{ //Lower case
-      if(fsm_state != FSM_SEARCH_SENSOR) {
-        memcpy(info_array_m, "Inst.: START to search sensor.",31);
-        fsm_state = FSM_SEARCH_SENSOR;
+      if(rlen <= 2) {
+        fsm_state = (fsm_state == FSM_SEARCH_SENSOR)?FSM_IDLE:FSM_SEARCH_SENSOR; // Toggle state
+      } else if((rlen >= 3) && (buf[1] == ':')) {
+        fsm_state = ((buf[2]=='T')||(buf[2]=='t'))?FSM_SEARCH_SENSOR:FSM_IDLE;
       } else {
-        memcpy(info_array_m, "Inst.: STOP to search sensor.",30);
-        fsm_state = FSM_IDLE;
+        fsm_state = FSM_ERROR;
+        error_no |= ERROR_SERIAL_INPUT;
+        break;
       }
-      print_debug_info(info_array_m,INFO_STANDARD_INFO);
+      print_debug_info_f(
+        (fsm_state == FSM_SEARCH_SENSOR)?F("Inst.: START to search sensor."):F("Inst.: STOP to search sensor.")
+        ,INFO_STANDARD_INFO);
       break;}
     case SI_DO_SINGLE_MEASUREMENT: 
     case (SI_DO_SINGLE_MEASUREMENT|0x20):{ //Lower case
-      memcpy(info_array_m, "Instruction to do single measurement.",38);print_debug_info(info_array_m,INFO_STANDARD_INFO);
-      fsm_state = FSM_DO_MEASUREMENT;
+      print_debug_info_f(F("Instruction to do single measurement."),INFO_STANDARD_INFO);
+      do_insturction_to_set_m = NT2S_DO_SINGLE_MEASUREMENT;
+      fsm_state = FSM_WRITE_INSTRUCTION;
+      get_response_m = true;
       break;}
     case SI_SET_INSTRUCTION: 
     case (SI_SET_INSTRUCTION|0x20): {//Lower case
-      memcpy(info_array_m, "Inst.: Send Do-Inst. to Tag.",29);print_debug_info(info_array_m,INFO_STANDARD_INFO); 
+      print_debug_info_f(F("Inst.: Send Do-Inst. to Tag."),INFO_STANDARD_INFO); 
       //E.g. buf = "I:0x06" -> get config
-      char instruction_ascii[3] = "FF"; 
-      sscanf(buf,"I:0x%s", instruction_ascii);
-      do_insturction_to_set_m = instruction_ascii_2_enum(instruction_ascii);
+      unsigned int new_instruction;
+      sscanf(buf,"I:%x", &new_instruction);
+      do_insturction_to_set_m = (uint8_t) new_instruction;
       memset(info_array_m,0,sizeof(info_array_m));
-      sprintf(info_array_m,"New instruction: 0x%x",do_insturction_to_set_m);
-      print_debug_info(info_array_m,INFO_STANDARD_INFO);  
-      fsm_state = (do_insturction_to_set_m != NT2S_ERROR)?FSM_WRITE_INSTRUCTION:FSM_ERROR;
+      sprintf(info_array_m,"New inst.: %x",do_insturction_to_set_m);
+      print_debug_info(INFO_STANDARD_INFO);  
+      fsm_state = (new_instruction != NT2S_ERROR)?FSM_WRITE_INSTRUCTION:FSM_ERROR;
       // ToDo: Parse instruction
       break;}
     case SI_READ: 
     case (SI_READ|0x20):{ //Lower case
-      memcpy(info_array_m, "Inst.: Do read tag data.",25);print_debug_info(info_array_m,INFO_STANDARD_INFO); 
+      print_debug_info_f(F("Inst.: Read tag data."),INFO_STANDARD_INFO); 
       fsm_state = FSM_READ_TAG_DATA;
       break;}
     case SI_WRITE: 
     case (SI_WRITE|0x20):{ //Lower case
-      memcpy(info_array_m, "Inst.: Do write data to tag.",29);print_debug_info(info_array_m,INFO_STANDARD_INFO); 
+      print_debug_info_f(F("Inst.: Do write data to tag."),INFO_STANDARD_INFO); 
       fsm_state = FSM_WRITE_DATA;
       // ToDo: Parse write data
       break;}
     case SI_CONTINUOUS_MEASUREMENT:
     case (SI_CONTINUOUS_MEASUREMENT|0x20): {//Lower case 
-      continuous_measurement = !continuous_measurement;
-      if(continuous_measurement) {
-        memcpy(info_array_m, "Inst.: START continuous measurement",36); 
-        next_measurement_time_s = millis()/1000;
+      if(rlen <= 2) {
+        continuous_measurement_m = !continuous_measurement_m;//toggle
+      } else if((rlen >= 3) && (buf[1] == ':')) {
+        continuous_measurement_m = ((buf[2]=='T')||(buf[2]=='t'))?true:false;
       } else {
-        memcpy(info_array_m, "Inst.: STOP continuous measurement",35);
+        fsm_state = FSM_ERROR;
+        error_no |= ERROR_SERIAL_INPUT;
+        break;
       }
-      print_debug_info(info_array_m,INFO_STANDARD_INFO); 
+      if(continuous_measurement_m) next_measurement_time_s_m = 0;
+      print_debug_info_f(
+        (continuous_measurement_m)?F("Inst.: START continuous measurement."):F("Inst.: STOP continuous measurement.")
+        ,INFO_STANDARD_INFO);
       break;
-      }
+    }
     case SI_CHANGE_TIMING_4_CM:
     case (SI_CHANGE_TIMING_4_CM|0x20): {//Lower case 
-        memcpy(info_array_m, "Inst.: Change timing for continuous measurement",48);print_debug_info(info_array_m,INFO_STANDARD_INFO); 
-      // ToDo: Parse timing value
-      break;}
+      print_debug_info_f(F("Inst.: Change timing for continuous measurement"),INFO_STANDARD_INFO); 
+      if(rlen >= 3) {
+        uint16_t parsed_interval;
+        int t = sscanf(&buf[1],":%u",&parsed_interval);
+        if(t == 1) {
+          cont_meas_interval_in_s_m = parsed_interval;
+          memset(info_array_m,0,sizeof(info_array_m));
+          sprintf(info_array_m,"New interval for continuous measurement: %u",parsed_interval);
+          print_debug_info(INFO_STANDARD_INFO);
+          break;
+        } 
+      } 
+      fsm_state = FSM_ERROR;
+      error_no |= ERROR_SERIAL_INPUT;
+      break;
+    }
+    case SI_RESET:
+    case (SI_RESET|0x20): { //Lower case
+      //softwareReset::standard();
+      break;
+    }
     default:{
-      memcpy(info_array_m, "Unknown serial instruction!!",29);print_debug_info(info_array_m,INFO_ERROR_INFO); 
+      print_debug_info_f(F("Unknown serial instruction!!"),INFO_ERROR_INFO); 
       fsm_state = FSM_ERROR;
       error_no |= ERROR_SERIAL_INPUT;
       break;}
